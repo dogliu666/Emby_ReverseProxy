@@ -4,6 +4,7 @@
 # 支持自动申请 Let’s Encrypt 证书
 # 包含主站点和多个推流地址代理
 # 支持统一子域名推流请求
+# 提供配置备份和回滚功能
 # ---------------------------------
 
 ##################################
@@ -24,7 +25,11 @@ install_certbot() {
   fi
 }
 
+##################################
 # 函数: 检查端口是否空闲
+# 参数: 端口号
+# 返回值: 0 表示空闲，1 表示被占用
+##################################
 check_port() {
   local port=$1
   if ss -tuln | grep -q ":$port "; then
@@ -34,7 +39,10 @@ check_port() {
   fi
 }
 
+##################################
 # 函数: 释放端口
+# 参数: 端口号
+##################################
 release_port() {
   local port=$1
   echo "正在尝试释放端口 $port ..."
@@ -59,7 +67,11 @@ release_port() {
   fi
 }
 
+##################################
 # 函数: 验证域名格式
+# 参数: 域名
+# 返回值: 0 表示有效，1 表示无效
+##################################
 validate_domain() {
   if [[ "$1" =~ ^[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
     return 0
@@ -69,7 +81,11 @@ validate_domain() {
   fi
 }
 
+##################################
 # 函数: 验证邮箱格式
+# 参数: 邮箱
+# 返回值: 0 表示有效，1 表示无效
+##################################
 validate_email() {
   if [[ "$1" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]; then
     return 0
@@ -79,7 +95,11 @@ validate_email() {
   fi
 }
 
+##################################
 # 函数: 验证推流地址格式
+# 参数: 推流地址
+# 返回值: 0 表示有效，1 表示无效
+##################################
 validate_stream_url() {
   if [[ "$1" =~ ^https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$ ]]; then
     return 0
@@ -89,7 +109,10 @@ validate_stream_url() {
   fi
 }
 
+##################################
 # 函数: 获取用户输入，支持默认值和重试
+# 参数: 提示信息, 变量名, 验证函数, 默认值
+##################################
 get_user_input() {
   local prompt=$1
   local var_name=$2
@@ -106,6 +129,45 @@ get_user_input() {
       echo "输入无效，请重新输入。"
     fi
   done
+}
+
+##################################
+# 函数: 备份现有 Nginx 配置
+# 参数: 配置文件路径
+##################################
+backup_nginx_config() {
+  local config_file=$1
+  local backup_dir="/etc/nginx/backup"
+  local timestamp=$(date +"%Y%m%d%H%M%S")
+  local backup_file="$backup_dir/$(basename "$config_file").$timestamp"
+
+  if [[ ! -d "$backup_dir" ]]; then
+    mkdir -p "$backup_dir"
+  fi
+
+  if [[ -f "$config_file" ]]; then
+    cp "$config_file" "$backup_file"
+    echo "已备份现有配置文件到: $backup_file"
+  else
+    echo "未找到现有配置文件，无需备份。"
+  fi
+}
+
+##################################
+# 函数: 回滚 Nginx 配置
+# 参数: 配置文件路径
+##################################
+rollback_nginx_config() {
+  local config_file=$1
+  local backup_dir="/etc/nginx/backup"
+  local latest_backup=$(ls -t "$backup_dir" | grep "$(basename "$config_file")" | head -n 1)
+
+  if [[ -n "$latest_backup" ]]; then
+    cp "$backup_dir/$latest_backup" "$config_file"
+    echo "已回滚配置文件到: $backup_dir/$latest_backup"
+  else
+    echo "未找到备份文件，无法回滚。"
+  fi
 }
 
 # 1. 检查是否为 root 权限
@@ -232,6 +294,9 @@ fi
 NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
 NGINX_CONF_ENABLED="/etc/nginx/sites-enabled/$DOMAIN"
 
+# 备份现有配置文件
+backup_nginx_config "$NGINX_CONF"
+
 echo "正在生成 Nginx 配置文件..."
 cat > "$NGINX_CONF" <<EOF
 map \$http_upgrade \$connection_upgrade {
@@ -267,7 +332,7 @@ server {
         proxy_ssl_server_name on;
 EOF
 
-# 选择统一子域名推流请求，则添加通配符子域名匹配规则
+# 如果用户选择统一子域名推流请求，则添加通配符子域名匹配规则
 if [[ "$UNIFY_SUBDOMAINS" == "y" || "$UNIFY_SUBDOMAINS" == "Y" ]]; then
   cat >> "$NGINX_CONF" <<EOF
 }
@@ -295,7 +360,7 @@ server {
     }
 EOF
 else
-  # 选择不统一子域名推流请求，则输入的推流地址配置
+  # 如果用户选择不统一子域名推流请求，则添加用户输入的推流地址配置
   for ((i=1; i<=STREAM_COUNT; i++)); do
     cat >> "$NGINX_CONF" <<EOF
     location /s$i {
@@ -322,7 +387,9 @@ echo "正在测试 Nginx 配置..."
 nginx -t
 
 if [[ $? -ne 0 ]]; then
-  echo "Nginx 配置测试失败，请检查配置文件。"
+  echo "Nginx 配置测试失败，正在回滚配置..."
+  rollback_nginx_config "$NGINX_CONF"
+  echo "请检查配置文件并重试。"
   exit 1
 fi
 
