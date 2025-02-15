@@ -413,6 +413,11 @@ nginx -t
 
 if [[ $? -ne 0 ]]; then
   echo "Nginx 配置测试失败，请检查配置文件。"
+  echo "可能的原因包括："
+  echo "1. 'server' 指令未正确放置在 'http' 块内。"
+  echo "2. 配置文件中有语法错误。"
+  echo "3. 证书路径或私钥路径不正确。"
+  echo "请检查配置文件 $NGINX_CONF 并修正错误后重试。"
   exit 1
 fi
 
