@@ -122,9 +122,9 @@ get_user_input() {
   local default_value=$4
 
   while true; do
-    read -rp "$prompt" input
+    read -erp "$prompt" input
     input="${input:-$default_value}"
-    if $validate_func "$input"; then
+    if [[ -z "$validate_func" ]] || $validate_func "$input"; then
       eval "$var_name='$input'"
       break
     else
@@ -227,7 +227,7 @@ if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
   # 3.3 若自动申请，则获取 Email
   get_user_input "请输入您的邮箱 (用于 Let’s Encrypt 注册): " EMAIL validate_email ""
 else
-  # 3.4 若不自动申请，则让用户手动填写证书路径
+  # 3.4 若不自动申请，则让用户手动填写证书路径（取消验证）
   get_user_input "请输入 SSL 证书文件绝对路径 (例如: /root/cert/example.com.cer): " SSL_CERT "" ""
   get_user_input "请输入 SSL 私钥文件绝对路径 (例如: /root/cert/example.com.key): " SSL_KEY "" ""
 fi
