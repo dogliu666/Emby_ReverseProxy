@@ -395,13 +395,11 @@ EOF
 EOF
     done
   fi
-  # 主 server 块闭合
-  cat >> "$NGINX_CONF" <<EOF
-    }
-EOF
 fi
 
+# 主 server 块闭合
 cat >> "$NGINX_CONF" <<EOF
+    }
 }
 EOF
 
