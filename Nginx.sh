@@ -4,11 +4,11 @@
 # 支持自动申请 Let’s Encrypt 证书
 # 包含主站点和多个推流地址代理
 # 支持统一子域名推流请求
-# 提供配置备份和回滚功能
 # ---------------------------------
 
 ##################################
 # 函数: 检测并设置包管理器 & 安装 certbot
+# 功能: 根据系统类型安装 certbot 和 python3-certbot-nginx
 ##################################
 install_certbot() {
   if [[ -f /etc/debian_version ]]; then
@@ -42,6 +42,7 @@ check_port() {
 ##################################
 # 函数: 释放端口
 # 参数: 端口号
+# 功能: 终止占用指定端口的进程
 ##################################
 release_port() {
   local port=$1
@@ -112,6 +113,7 @@ validate_stream_url() {
 ##################################
 # 函数: 获取用户输入，支持默认值和重试
 # 参数: 提示信息, 变量名, 验证函数, 默认值
+# 功能: 获取用户输入并验证，支持默认值和重试机制
 ##################################
 get_user_input() {
   local prompt=$1
@@ -132,42 +134,44 @@ get_user_input() {
 }
 
 ##################################
-# 函数: 备份现有 Nginx 配置
-# 参数: 配置文件路径
+# 函数: 检测并安装 Nginx 依赖项
+# 功能: 检测并安装 Nginx 运行所需的依赖项
 ##################################
-backup_nginx_config() {
-  local config_file=$1
-  local backup_dir="/etc/nginx/backup"
-  local timestamp=$(date +"%Y%m%d%H%M%S")
-  local backup_file="$backup_dir/$(basename "$config_file").$timestamp"
+install_nginx_dependencies() {
+  echo "正在检测并安装 Nginx 依赖项..."
 
-  if [[ ! -d "$backup_dir" ]]; then
-    mkdir -p "$backup_dir"
-  fi
+  # 定义 Nginx 所需的常见依赖项
+  local dependencies=("openssl" "libpcre3" "zlib1g" "libssl-dev" "pcre-devel" "zlib-devel")
 
-  if [[ -f "$config_file" ]]; then
-    cp "$config_file" "$backup_file"
-    echo "已备份现有配置文件到: $backup_file"
+  # 根据系统类型选择包管理器
+  if [[ -f /etc/debian_version ]]; then
+    # Debian / Ubuntu 系统
+    apt-get update
+    for dep in "${dependencies[@]}"; do
+      if ! dpkg -l | grep -q "^ii  $dep "; then
+        echo "正在安装依赖项: $dep"
+        apt-get install -y "$dep"
+      else
+        echo "依赖项 $dep 已安装。"
+      fi
+    done
+  elif [[ -f /etc/centos-release || -f /etc/redhat-release ]]; then
+    # CentOS / RHEL / Rocky / Alma 等系统
+    yum makecache fast
+    for dep in "${dependencies[@]}"; do
+      if ! rpm -q "$dep" &>/dev/null; then
+        echo "正在安装依赖项: $dep"
+        yum install -y "$dep"
+      else
+        echo "依赖项 $dep 已安装。"
+      fi
+    done
   else
-    echo "未找到现有配置文件，无需备份。"
+    echo "暂不支持此系统的自动安装依赖项，请手动安装后重试。"
+    exit 1
   fi
-}
 
-##################################
-# 函数: 回滚 Nginx 配置
-# 参数: 配置文件路径
-##################################
-rollback_nginx_config() {
-  local config_file=$1
-  local backup_dir="/etc/nginx/backup"
-  local latest_backup=$(ls -t "$backup_dir" | grep "$(basename "$config_file")" | head -n 1)
-
-  if [[ -n "$latest_backup" ]]; then
-    cp "$backup_dir/$latest_backup" "$config_file"
-    echo "已回滚配置文件到: $backup_dir/$latest_backup"
-  else
-    echo "未找到备份文件，无法回滚。"
-  fi
+  echo "Nginx 依赖项检测与安装完成。"
 }
 
 # 1. 检查是否为 root 权限
@@ -257,7 +261,10 @@ if [[ "$CONFIRM" != "y" && "$CONFIRM" != "Y" ]]; then
   exit 1
 fi
 
-# 4. 安装 Nginx
+# 4. 安装 Nginx 依赖项
+install_nginx_dependencies
+
+# 5. 安装 Nginx
 echo "正在安装 Nginx..."
 if [[ -f /etc/debian_version ]]; then
   apt-get update
@@ -269,7 +276,7 @@ else
   exit 1
 fi
 
-# 5. 如果选择自动申请证书，尝试安装并使用 certbot
+# 6. 如果选择自动申请证书，尝试安装并使用 certbot
 if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
   install_certbot
 
@@ -290,12 +297,9 @@ if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
   SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 fi
 
-# 6. 生成 Nginx 配置文件
+# 7. 生成 Nginx 配置文件
 NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
 NGINX_CONF_ENABLED="/etc/nginx/sites-enabled/$DOMAIN"
-
-# 备份现有配置文件
-backup_nginx_config "$NGINX_CONF"
 
 echo "正在生成 Nginx 配置文件..."
 cat > "$NGINX_CONF" <<EOF
@@ -387,17 +391,15 @@ echo "正在测试 Nginx 配置..."
 nginx -t
 
 if [[ $? -ne 0 ]]; then
-  echo "Nginx 配置测试失败，正在回滚配置..."
-  rollback_nginx_config "$NGINX_CONF"
-  echo "请检查配置文件并重试。"
+  echo "Nginx 配置测试失败，请检查配置文件。"
   exit 1
 fi
 
-# 7. 重启 Nginx
+# 8. 重启 Nginx
 echo "正在重启 Nginx..."
 systemctl restart nginx
 
-# 8. 检查 Certbot 续签任务是否已配置
+# 9. 检查 Certbot 续签任务是否已配置
 if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
   echo "正在检查 Certbot 续签任务..."
   CRON_JOB=$(crontab -l 2>/dev/null | grep "certbot renew")
