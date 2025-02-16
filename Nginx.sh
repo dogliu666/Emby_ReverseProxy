@@ -314,18 +314,15 @@ NGINX_CONF_ENABLED="/etc/nginx/sites-enabled/$DOMAIN"
 echo "正在生成 Nginx 配置文件..."
 cat > "$NGINX_CONF" <<EOF
 http {
-    map \$http_upgrade \$connection_upgrade {
+    map $http_upgrade $connection_upgrade {
         default upgrade;
-        '' close;
+        ''      close;
     }
 
     server {
         listen 80;
         server_name $DOMAIN;
-        return 301 https://\$host\$request_uri;
-        location / {
-      proxy_pass $EMBY_URL; 
-    }
+        return 301 https://$host$request_uri;
   }
 
     server {
