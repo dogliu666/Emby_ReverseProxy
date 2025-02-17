@@ -102,10 +102,10 @@ validate_email() {
 # 返回值: 0 表示有效，1 表示无效
 ##################################
 validate_stream_url() {
-  if [[ "$1" =~ ^https?://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$ ]]; then
+  if [[ "$1" =~ ^https://[a-zA-Z0-9.-]+(:[0-9]+)?(/.*)?$ ]]; then
     return 0
   else
-    echo "错误：推流地址格式不正确，必须以 http:// 或 https:// 开头。"
+    echo "错误：推流地址格式不正确，必须以 https:// 开头。"
     return 1
   fi
 }
@@ -174,6 +174,136 @@ install_nginx_dependencies() {
   echo "Nginx 依赖项检测与安装完成。"
 }
 
+##################################
+# 函数: 生成统一子域名推流的 Nginx 配置文件
+# 参数: 域名, SSL 证书路径, SSL 私钥路径, Emby 主站地址
+##################################
+generate_unified_config() {
+  local domain=$1
+  local ssl_cert=$2
+  local ssl_key=$3
+  local emby_url=$4
+
+  local nginx_conf="/etc/nginx/sites-available/${domain}_unified"
+  local nginx_conf_enabled="/etc/nginx/sites-enabled/${domain}_unified"
+
+  cat > "$nginx_conf" <<EOF
+server {
+    listen 80;
+    server_name $domain;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $domain;
+
+    ssl_certificate $ssl_cert;
+    ssl_certificate_key $ssl_key;
+
+    client_max_body_size 20M;
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-XSS-Protection "1; mode=block";
+    add_header X-Content-Type-Options "nosniff";
+
+    location / {
+        proxy_pass $emby_url;
+        proxy_http_version 1.1;
+        proxy_set_header Host $emby_host
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_set_header Referer "$emby_url/web/index.html";
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "";
+        proxy_set_header Connection "upgrade";
+        proxy_ssl_server_name on;
+        proxy_buffering off;
+    }
+}
+
+EOF
+
+  # 创建符号链接到 sites-enabled
+  ln -sf "$nginx_conf" "$nginx_conf_enabled"
+  echo "统一子域名推流配置文件已生成：$nginx_conf"
+}
+
+##################################
+# 函数: 生成不统一子域名推流的 Nginx 配置文件
+# 参数: 域名, SSL 证书路径, SSL 私钥路径, Emby 主站地址, 推流地址数组
+##################################
+generate_non_unified_config() {
+  local domain=$1
+  local ssl_cert=$2
+  local ssl_key=$3
+  local emby_url=$4
+  local -n streams=$5
+
+  local nginx_conf="/etc/nginx/sites-available/${domain}_non_unified"
+  local nginx_conf_enabled="/etc/nginx/sites-enabled/${domain}_non_unified"
+
+  cat > "$nginx_conf" <<EOF
+server {
+    listen 80;
+    server_name $domain;
+    return 301 https://\$host\$request_uri;
+}
+
+server {
+    listen 443 ssl http2;
+    server_name $domain;
+
+    ssl_certificate $ssl_cert;
+    ssl_certificate_key $ssl_key;
+
+    client_max_body_size 20M;
+    add_header X-Frame-Options "SAMEORIGIN";
+    add_header X-XSS-Protection "1; mode=block";
+    add_header X-Content-Type-Options "nosniff";
+
+    location / {
+        proxy_pass $emby_url;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header X-Forwarded-Host \$host;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Connection \$connection_upgrade;
+        proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_set_header Referer "$emby_url/web/index.html";
+        proxy_set_header Connection "";
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_ssl_server_name on;
+        proxy_buffering off;
+    }
+EOF
+
+  # 添加推流地址配置
+  for ((i=1; i<=${#streams[@]}; i++)); do
+    cat >> "$nginx_conf" <<EOF
+    location /s$i {
+        rewrite ^/s$i(/.*)\$ \$1 break;
+        proxy_pass ${streams[$i]};
+        proxy_set_header Referer "$emby_url/web/index.html";
+        proxy_set_header Host $emby_host;
+        proxy_ssl_server_name on;
+        proxy_buffering off;
+    }
+EOF
+  done
+
+  cat >> "$nginx_conf" <<EOF
+}
+EOF
+
+  # 创建符号链接到 sites-enabled
+  ln -sf "$nginx_conf" "$nginx_conf_enabled"
+  echo "不统一子域名推流配置文件已生成：$nginx_conf"
+}
+
+# 主逻辑
 # 1. 检查是否为 root 权限
 if [[ $EUID -ne 0 ]]; then
    echo "本脚本需要 root 权限，请使用 sudo 或切换为 root 后再执行。"
@@ -198,7 +328,7 @@ done
 
 # 3. 交互式获取必要参数
 get_user_input "请输入您的域名 (例如: p.example.com): " DOMAIN validate_domain ""
-get_user_input "请输入Emby主站地址 (例如: https://emby.example.com): " EMBY_URL validate_stream_url ""
+get_user_input "请输入Emby主站地址 (例如: https://emby.example.com): " EMBY_URL validate_stream_url "https://"
 
 # 3.1 询问是否需要将所有子域名的请求统一推流到主站
 read -rp "是否需要将所有子域名的请求统一推流到主站？[y/n] (默认 n): " UNIFY_SUBDOMAINS
@@ -307,106 +437,17 @@ if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
   SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
 fi
 
+# 提取 Emby 主站地址的域名部分（去掉https://）
+EMBY_HOST=$(echo "$EMBY_URL" | sed -E 's#^https?://##; s#/.*##')
+
 # 7. 生成 Nginx 配置文件
-NGINX_CONF="/etc/nginx/sites-available/$DOMAIN"
-NGINX_CONF_ENABLED="/etc/nginx/sites-enabled/$DOMAIN"
-
-echo "正在生成 Nginx 配置文件..."
-cat > "$NGINX_CONF" <<EOF
-http {
-    map $http_upgrade $connection_upgrade {
-        default upgrade;
-        ''      close;
-    }
-
-    server {
-        listen 80;
-        server_name $DOMAIN;
-        return 301 https://$host$request_uri;
-  }
-
-    server {
-        listen 443 ssl http2;
-        server_name $DOMAIN;
-
-        ssl_certificate $SSL_CERT;
-        ssl_certificate_key $SSL_KEY;
-
-        client_max_body_size 20M;
-        add_header X-Frame-Options "SAMEORIGIN";
-        add_header X-XSS-Protection "1; mode=block";
-        add_header X-Content-Type-Options "nosniff";
-
-        location / {
-            proxy_pass $EMBY_URL;
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade \$http_upgrade;
-            proxy_set_header Connection \$connection_upgrade;
-            proxy_set_header Host \$proxy_host;
-            proxy_set_header Referer "$EMBY_URL/web/index.html";
-            proxy_ssl_server_name on;
-        }
-EOF
-
-# 如果用户选择统一子域名推流请求，则添加通配符子域名匹配规则
 if [[ "$UNIFY_SUBDOMAINS" == "y" || "$UNIFY_SUBDOMAINS" == "Y" ]]; then
-  cat >> "$NGINX_CONF" <<EOF
-
-    server {
-        listen 443 ssl http2;
-        server_name ~^(.*)\.$DOMAIN$;
-
-        ssl_certificate $SSL_CERT;
-        ssl_certificate_key $SSL_KEY;
-
-        client_max_body_size 20M;
-        add_header X-Frame-Options "SAMEORIGIN";
-        add_header X-XSS-Protection "1; mode=block";
-        add_header X-Content-Type-Options "nosniff";
-
-        location / {
-            proxy_pass $EMBY_URL;
-            proxy_http_version 1.1;
-            proxy_set_header Upgrade \$http_upgrade;
-            proxy_set_header Connection \$connection_upgrade;
-            proxy_set_header Host \$proxy_host;
-            proxy_set_header Referer "$EMBY_URL/web/index.html";
-            proxy_ssl_server_name on;
-        }
-    }
-EOF
+  generate_unified_config "$DOMAIN" "$SSL_CERT" "$SSL_KEY" "$EMBY_URL"
 else
-  # 如果用户选择不统一子域名推流请求，则根据推流地址数量生成配置
-  if [[ "$STREAM_COUNT" -gt 0 ]]; then
-    cat >> "$NGINX_CONF" <<EOF
-
-        # 推流地址配置
-EOF
-    for ((i=1; i<=STREAM_COUNT; i++)); do
-      cat >> "$NGINX_CONF" <<EOF
-        location /s$i {
-            rewrite ^/s$i(/.*)\$ \$1 break;
-            proxy_pass ${STREAMS[$i]};
-            proxy_set_header Referer "$EMBY_URL/web/index.html";
-            proxy_set_header Host \$proxy_host;
-            proxy_ssl_server_name on;
-            proxy_buffering off;
-        }
-EOF
-    done
-  fi
+  generate_non_unified_config "$DOMAIN" "$SSL_CERT" "$SSL_KEY" "$EMBY_URL" STREAMS
 fi
 
-# 主 server 块闭合
-cat >> "$NGINX_CONF" <<EOF
-    }
-}
-EOF
-
-# 创建符号链接到 sites-enabled
-ln -sf "$NGINX_CONF" "$NGINX_CONF_ENABLED"
-
-# 测试 Nginx 配置
+# 8. 测试 Nginx 配置
 echo "正在测试 Nginx 配置..."
 nginx -t
 
@@ -416,15 +457,15 @@ if [[ $? -ne 0 ]]; then
   echo "1. 'server' 指令未正确放置在 'http' 块内。"
   echo "2. 配置文件中有语法错误。"
   echo "3. 证书路径或私钥路径不正确。"
-  echo "请检查配置文件 $NGINX_CONF 并修正错误后重试。"
+  echo "请检查配置文件并修正错误后重试。"
   exit 1
 fi
 
-# 8. 重启 Nginx
+# 9. 重启 Nginx
 echo "正在重启 Nginx..."
 systemctl restart nginx
 
-# 9. 检查 Certbot 续签任务是否已配置
+# 10. 检查 Certbot 续签任务是否已配置
 if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
   echo "正在检查 Certbot 续签任务..."
   CRON_JOB=$(crontab -l 2>/dev/null | grep "certbot renew")
@@ -455,7 +496,7 @@ else
     echo "仅反向代理主站地址。"
   fi
 fi
-echo "Nginx 配置文件: $NGINX_CONF"
+echo "Nginx 配置文件: /etc/nginx/sites-available/${DOMAIN}_*"
 if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
   echo
   echo "SSL 证书位于:  /etc/letsencrypt/live/$DOMAIN/"
