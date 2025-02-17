@@ -207,9 +207,9 @@ server {
     add_header X-Content-Type-Options "nosniff";
 
     location / {
-        proxy_pass $emby_url;
+        proxy_pass $emby_url:443;
         proxy_http_version 1.1;
-        proxy_set_header Host $emby_host
+        proxy_set_header Host $emby_host;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Proto \$scheme;
@@ -264,7 +264,7 @@ server {
     add_header X-Content-Type-Options "nosniff";
 
     location / {
-        proxy_pass $emby_url;
+        proxy_pass $emby_url:443;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header X-Forwarded-Host \$host;
@@ -285,7 +285,7 @@ EOF
     cat >> "$nginx_conf" <<EOF
     location /s$i {
         rewrite ^/s$i(/.*)\$ \$1 break;
-        proxy_pass ${streams[$i]};
+        proxy_pass ${streams[$i]}:443;
         proxy_set_header Referer "$emby_url/web/index.html";
         proxy_set_header Host $emby_host;
         proxy_ssl_server_name on;
