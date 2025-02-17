@@ -208,18 +208,18 @@ server {
 
     location / {
         proxy_pass $emby_url:443;
-        proxy_http_version 1.1;
         proxy_set_header Host $emby_host;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port \$server_port;
-        proxy_set_header Referer "$emby_url/web/index.html";
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "";
-        proxy_set_header Connection "upgrade";
         proxy_ssl_server_name on;
+        proxy_http_version 1.1;
+        proxy_set_header Referer "$emby_url/web/index.html";
+        proxy_set_header Connection "";
         proxy_buffering off;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 }
 
@@ -265,18 +265,18 @@ server {
 
     location / {
         proxy_pass $emby_url:443;
-        proxy_http_version 1.1;
+        proxy_set_header Host $emby_host;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Proto \$scheme;
-        proxy_set_header Connection \$connection_upgrade;
         proxy_set_header X-Forwarded-Port \$server_port;
+        proxy_ssl_server_name on;
+        proxy_http_version 1.1;
         proxy_set_header Referer "$emby_url/web/index.html";
         proxy_set_header Connection "";
-        proxy_set_header Upgrade \$http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_ssl_server_name on;
         proxy_buffering off;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
     }
 EOF
 
