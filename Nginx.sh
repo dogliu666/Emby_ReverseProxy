@@ -47,20 +47,17 @@ check_port() {
 release_port() {
   local port=$1
   echo "正在尝试释放端口 $port ..."
-  if ss -tuln | grep -q ":$port "; then
-    # 获取占用端口的进程 PID
-    local pid=$(ss -tuln | grep ":$port " | awk '{print $6}' | cut -d':' -f2)
-    if [[ -n $pid ]]; then
-      echo "端口 $port 被进程 PID $pid 占用，正在终止该进程..."
-      kill -9 "$pid"
-      if [[ $? -eq 0 ]]; then
-        echo "进程已终止，端口 $port 已释放。"
-      else
-        echo "无法终止进程，请手动检查。"
-        exit 1
-      fi
+  
+  # 使用 ss 命令查找占用端口的进程
+  local pid=$(ss -tuln | grep ":$port " | awk '{print $6}' | cut -d':' -f2)
+  
+  if [[ -n $pid ]]; then
+    echo "端口 $port 被进程 PID $pid 占用，正在终止该进程..."
+    kill -9 "$pid"
+    if [[ $? -eq 0 ]]; then
+      echo "进程已终止，端口 $port 已释放。"
     else
-      echo "无法获取占用端口的进程信息，请手动检查。"
+      echo "无法终止进程，请手动检查。"
       exit 1
     fi
   else
@@ -186,30 +183,33 @@ generate_unified_config() {
 
   local nginx_conf="/etc/nginx/sites-available/${domain}_unified"
   local nginx_conf_enabled="/etc/nginx/sites-enabled/${domain}_unified"
+  
+  # 确保目录存在
+  mkdir -p /etc/nginx/sites-available
+  mkdir -p /etc/nginx/sites-enabled
 
   cat > "$nginx_conf" <<EOF
+  map \$http_upgrade \$connection_upgrade {
+    default upgrade;
+    ''      close;
+}
 server {
     listen 80;
     server_name $domain;
     return 301 https://\$host\$request_uri;
 }
-
 server {
     listen 443 ssl http2;
     server_name $domain;
-
     ssl_certificate $ssl_cert;
     ssl_certificate_key $ssl_key;
-
     client_max_body_size 20M;
     add_header X-Frame-Options "SAMEORIGIN";
     add_header X-XSS-Protection "1; mode=block";
     add_header X-Content-Type-Options "nosniff";
-
     location / {
         proxy_pass $emby_url:443;
         proxy_set_header Host $emby_host;
-        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port \$server_port;
@@ -218,11 +218,10 @@ server {
         proxy_set_header Referer "$emby_url/web/index.html";
         proxy_set_header Connection "";
         proxy_buffering off;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-    }
-}
-
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+     }
+   }
 EOF
 
   # 创建符号链接到 sites-enabled
@@ -243,30 +242,36 @@ generate_non_unified_config() {
 
   local nginx_conf="/etc/nginx/sites-available/${domain}_non_unified"
   local nginx_conf_enabled="/etc/nginx/sites-enabled/${domain}_non_unified"
+  
+  # 提取 Emby 主站地址的域名部分
+  local emby_host=$(echo "$emby_url" | sed -E 's#^https?://##; s#/.*##')
+  
+  # 确保目录存在
+  mkdir -p /etc/nginx/sites-available
+  mkdir -p /etc/nginx/sites-enabled
 
   cat > "$nginx_conf" <<EOF
+  map \$http_upgrade \$connection_upgrade {
+    default upgrade;
+    ''      close;
+}
 server {
     listen 80;
     server_name $domain;
     return 301 https://\$host\$request_uri;
 }
-
 server {
     listen 443 ssl http2;
     server_name $domain;
-
     ssl_certificate $ssl_cert;
     ssl_certificate_key $ssl_key;
-
     client_max_body_size 20M;
     add_header X-Frame-Options "SAMEORIGIN";
     add_header X-XSS-Protection "1; mode=block";
     add_header X-Content-Type-Options "nosniff";
-
     location / {
         proxy_pass $emby_url:443;
         proxy_set_header Host $emby_host;
-        proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header X-Forwarded-Host \$host;
         proxy_set_header X-Forwarded-Proto \$scheme;
         proxy_set_header X-Forwarded-Port \$server_port;
@@ -275,9 +280,14 @@ server {
         proxy_set_header Referer "$emby_url/web/index.html";
         proxy_set_header Connection "";
         proxy_buffering off;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection \$connection_upgrade;
+        
+         # 流路径重定向
+        proxy_redirect default;
+        proxy_redirect ${streams[$i]} https://$domain/s$i/;
     }
+  }
 EOF
 
   # 添加推流地址配置
@@ -288,16 +298,19 @@ EOF
         proxy_pass ${streams[$i]}:443;
         proxy_set_header Referer "$emby_url/web/index.html";
         proxy_set_header Host $emby_host;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
         proxy_ssl_server_name on;
         proxy_buffering off;
     }
 EOF
-  done
-
-  cat >> "$nginx_conf" <<EOF
+    
+    cat >> "$nginx_conf" <<EOF
 }
 EOF
 
+  done
+  
   # 创建符号链接到 sites-enabled
   ln -sf "$nginx_conf" "$nginx_conf_enabled"
   echo "不统一子域名推流配置文件已生成：$nginx_conf"
@@ -327,25 +340,25 @@ for port in "${PORTS[@]}"; do
 done
 
 # 3. 交互式获取必要参数
-get_user_input "请输入您的域名 (例如: p.example.com): " DOMAIN validate_domain ""
-get_user_input "请输入Emby主站地址 (例如: https://emby.example.com): " EMBY_URL validate_stream_url "https://"
+get_user_input "请输入您的域名 (例如: p.example.com): " domain validate_domain ""
+get_user_input "请输入Emby主站地址 (例如: https://emby.example.com): " emby_url validate_stream_url "https://"
 
 # 3.1 询问是否需要将所有子域名的请求统一推流到主站
-read -rp "是否需要将所有子域名的请求统一推流到主站？[y/n] (默认 n): " UNIFY_SUBDOMAINS
-UNIFY_SUBDOMAINS="${UNIFY_SUBDOMAINS:-n}"
+read -rp "是否需要将所有子域名的请求统一推流到主站？[y/n] (默认 n): " unify_subdomains
+unify_subdomains="${unify_subdomains:-n}"
 
-if [[ "$UNIFY_SUBDOMAINS" == "y" || "$UNIFY_SUBDOMAINS" == "Y" ]]; then
+if [[ "$unify_subdomains" == "y" || "$unify_subdomains" == "Y" ]]; then
   # 如果用户选择统一子域名推流请求，则设置一个标志
   echo "已启用统一子域名推流请求，所有子域名的请求将被代理到主站地址。"
 else
   # 如果用户选择不统一子域名推流请求，则继续让用户输入推流地址数量
-  read -rp "请输入推流地址数量 (例如: 4，输入 0 表示仅反向代理主站地址): " STREAM_COUNT
-  STREAM_COUNT="${STREAM_COUNT:-0}"
+  read -rp "请输入推流地址数量 (例如: 4，输入 0 表示仅反向代理主站地址): " stream_count
+  stream_count="${stream_count:-0}"
 
-  if [[ "$STREAM_COUNT" -gt 0 ]]; then
-    declare -A STREAMS
-    for ((i=1; i<=STREAM_COUNT; i++)); do
-      get_user_input "请输入第 $i 个推流地址 (例如: https://stream$i.example.com): " STREAMS[$i] validate_stream_url ""
+  if [[ "$stream_count" -gt 0 ]]; then
+    declare -A streams
+    for ((i=1; i<=stream_count; i++)); do
+      get_user_input "请输入第 $i 个推流地址 (例如: https://stream$i.example.com): " streams[$i] validate_stream_url ""
     done
   else
     echo "推流地址数量为零，仅反向代理主站地址。"
@@ -353,44 +366,44 @@ else
 fi
 
 # 3.2 是否自动申请 Let’s Encrypt 证书
-read -rp "是否自动申请/更新 Let’s Encrypt 证书？[y/n] (默认 n): " AUTO_SSL
-AUTO_SSL="${AUTO_SSL:-n}"
+read -rp "是否自动申请/更新 Let’s Encrypt 证书？[y/n] (默认 n): " auto_ssl
+auto_ssl="${auto_ssl:-n}"
 
-SSL_CERT=""
-SSL_KEY=""
+ssl_cert=""
+ssl_key=""
 
-if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
+if [[ "$auto_ssl" == "y" || "$auto_ssl" == "Y" ]]; then
   # 3.3 若自动申请，则获取 Email
-  get_user_input "请输入您的邮箱 (用于 Let’s Encrypt 注册): " EMAIL validate_email ""
+  get_user_input "请输入您的邮箱 (用于 Let’s Encrypt 注册): " email validate_email ""
 else
   # 3.4 若不自动申请，则让用户手动填写证书路径（取消验证）
-  get_user_input "请输入 SSL 证书文件绝对路径 (例如: /root/cert/example.com.cer): " SSL_CERT "" ""
-  get_user_input "请输入 SSL 私钥文件绝对路径 (例如: /root/cert/example.com.key): " SSL_KEY "" ""
+  get_user_input "请输入 SSL 证书文件绝对路径 (例如: /root/cert/example.com.cer): " ssl_cert "" ""
+  get_user_input "请输入 SSL 私钥文件绝对路径 (例如: /root/cert/example.com.key): " ssl_key "" ""
 fi
 
 # 显示配置信息，供用户确认
 echo "===================== 配置确认 ====================="
-echo "代理域名 (Domain)          : $DOMAIN"
-echo "Emby主站地址 (Emby URL)    : $EMBY_URL"
-if [[ "$UNIFY_SUBDOMAINS" == "y" || "$UNIFY_SUBDOMAINS" == "Y" ]]; then
+echo "代理域名 (Domain)          : $domain"
+echo "Emby主站地址 (Emby URL)    : $emby_url"
+if [[ "$unify_subdomains" == "y" || "$unify_subdomains" == "Y" ]]; then
   echo "已启用统一子域名推流请求，所有子域名的请求将被代理到主站地址。"
 else
-  if [[ "$STREAM_COUNT" -gt 0 ]]; then
-    echo "推流地址数量               : $STREAM_COUNT"
-    for ((i=1; i<=STREAM_COUNT; i++)); do
-      echo "推流地址 $i                : ${STREAMS[$i]}"
+  if [[ "$stream_count" -gt 0 ]]; then
+    echo "推流地址数量               : $stream_count"
+    for ((i=1; i<=stream_count; i++)); do
+      echo "推流地址 $i                : ${streams[$i]}"
     done
   else
     echo "仅反向代理主站地址。"
   fi
 fi
-echo "自动申请证书 (AUTO_SSL)    : $AUTO_SSL"
-if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
-  echo "邮箱 (Email)               : $EMAIL"
-  echo "证书路径将保存在 Let’s Encrypt 默认目录: /etc/letsencrypt/live/$DOMAIN"
+echo "自动申请证书 (auto_ssl)    : $auto_ssl"
+if [[ "$auto_ssl" == "y" || "$auto_ssl" == "Y" ]]; then
+  echo "邮箱 (Email)               : $email"
+  echo "证书路径将保存在 Let’s Encrypt 默认目录: /etc/letsencrypt/live/$domain"
 else
-  echo "SSL 证书 (SSL_CERT)        : $SSL_CERT"
-  echo "SSL 私钥 (SSL_KEY)         : $SSL_KEY"
+  echo "SSL 证书 (ssl_cert)        : $ssl_cert"
+  echo "SSL 私钥 (ssl_key)         : $ssl_key"
 fi
 echo "===================================================="
 
@@ -417,34 +430,34 @@ else
 fi
 
 # 6. 如果选择自动申请证书，尝试安装并使用 certbot
-if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
+if [[ "$auto_ssl" == "y" || "$auto_ssl" == "Y" ]]; then
   install_certbot
 
-  echo "使用 certbot 为 $DOMAIN 申请/更新证书..."
+  echo "使用 certbot 为 $domain 申请/更新证书..."
   systemctl stop nginx 2>/dev/null || true
 
   certbot certonly --nginx \
     --agree-tos --no-eff-email \
-    -m "$EMAIL" \
-    -d "$DOMAIN"
+    -m "$email" \
+    -d "$domain"
 
   if [[ $? -ne 0 ]]; then
     echo "Let’s Encrypt 证书申请失败，请检查错误信息。脚本退出。"
     exit 1
   fi
 
-  SSL_CERT="/etc/letsencrypt/live/$DOMAIN/fullchain.pem"
-  SSL_KEY="/etc/letsencrypt/live/$DOMAIN/privkey.pem"
+  ssl_cert="/etc/letsencrypt/live/$domain/fullchain.pem"
+  ssl_key="/etc/letsencrypt/live/$domain/privkey.pem"
 fi
 
 # 提取 Emby 主站地址的域名部分（去掉https://）
-EMBY_HOST=$(echo "$EMBY_URL" | sed -E 's#^https?://##; s#/.*##')
+emby_host=$(echo "$emby_url" | sed -E 's#^https?://##; s#/.*##')
 
 # 7. 生成 Nginx 配置文件
-if [[ "$UNIFY_SUBDOMAINS" == "y" || "$UNIFY_SUBDOMAINS" == "Y" ]]; then
-  generate_unified_config "$DOMAIN" "$SSL_CERT" "$SSL_KEY" "$EMBY_URL"
+if [[ "$unify_subdomains" == "y" || "$unify_subdomains" == "Y" ]]; then
+  generate_unified_config "$domain" "$ssl_cert" "$ssl_key" "$emby_url"
 else
-  generate_non_unified_config "$DOMAIN" "$SSL_CERT" "$SSL_KEY" "$EMBY_URL" STREAMS
+  generate_non_unified_config "$domain" "$ssl_cert" "$ssl_key" "$emby_url" streams
 fi
 
 # 8. 测试 Nginx 配置
@@ -466,7 +479,7 @@ echo "正在重启 Nginx..."
 systemctl restart nginx
 
 # 10. 检查 Certbot 续签任务是否已配置
-if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
+if [[ "$auto_ssl" == "y" || "$auto_ssl" == "Y" ]]; then
   echo "正在检查 Certbot 续签任务..."
   CRON_JOB=$(crontab -l 2>/dev/null | grep "certbot renew")
   if [ -z "$CRON_JOB" ]; then
@@ -482,24 +495,24 @@ fi
 echo "===================================================="
 echo "Nginx 反向代理配置完成！"
 echo
-echo "代理域名:      $DOMAIN"
-echo "Emby主站地址:  $EMBY_URL"
-if [[ "$UNIFY_SUBDOMAINS" == "y" || "$UNIFY_SUBDOMAINS" == "Y" ]]; then
+echo "代理域名:      $domain"
+echo "Emby主站地址:  $emby_url"
+if [[ "$unify_subdomains" == "y" || "$unify_subdomains" == "Y" ]]; then
   echo "已启用统一子域名推流请求，所有子域名的请求将被代理到主站地址。"
 else
-  if [[ "$STREAM_COUNT" -gt 0 ]]; then
+  if [[ "$stream_count" -gt 0 ]]; then
     echo "推流地址配置:"
-    for ((i=1; i<=STREAM_COUNT; i++)); do
-      echo "  /s$i -> ${STREAMS[$i]}"
+    for ((i=1; i<=stream_count; i++)); do
+      echo "  /s$i -> ${streams[$i]}"
     done
   else
     echo "仅反向代理主站地址。"
   fi
 fi
-echo "Nginx 配置文件: /etc/nginx/sites-available/${DOMAIN}_*"
-if [[ "$AUTO_SSL" == "y" || "$AUTO_SSL" == "Y" ]]; then
+echo "Nginx 配置文件: /etc/nginx/sites-available/${domain}_*"
+if [[ "$auto_ssl" == "y" || "$auto_ssl" == "Y" ]]; then
   echo
-  echo "SSL 证书位于:  /etc/letsencrypt/live/$DOMAIN/"
+  echo "SSL 证书位于:  /etc/letsencrypt/live/$domain/"
   echo "Let’s Encrypt 证书有效期为 90 天，Certbot 会定期自动续期。"
 fi
 echo
