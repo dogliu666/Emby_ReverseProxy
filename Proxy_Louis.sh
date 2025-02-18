@@ -61,33 +61,18 @@ port_check() {
   process_name=$(ps -p "$pid" -o comm= 2>/dev/null || echo "未知进程")
   info "进程名称: $process_name"
   
-  read -rp "是否释放该端口并继续？[y/N]: " choice
-  if [[ $choice =~ [yY] ]]; then
-    info "正在尝试终止进程 $pid..."
-    if kill -15 "$pid" 2>/dev/null; then
-      sleep 2  # 给进程一些退出的时间
-      if kill -0 "$pid" 2>/dev/null; then
-        warning "进程未响应SIGTERM信号，尝试强制终止..."
-        if kill -9 "$pid" 2>/dev/null; then
-          success "已强制终止进程 $pid"
-        else
-          error "无法终止进程 $pid，请手动检查"
-        fi
-      else
-        success "已成功终止进程 $pid"
-      fi
-      sleep 1  # 等待端口完全释放
-    else
-      error "终止进程 $pid 失败，可能需要更高权限"
-    fi
-    
-    # 二次确认端口是否已释放
-    if ss -tuln | grep -q ":$port "; then
-      error "端口 $port 仍被占用，请手动处理"
-    fi
-  else
-    error "操作已取消"
+  # 如果是nginx进程，直接停止服务
+  if [[ "$process_name" == "nginx" ]]; then
+    info "检测到nginx进程，正在停止服务..."
+    systemctl stop nginx
+    sleep 2
+    success "nginx服务已停止"
+    return 0
   fi
+  
+  # 对于非nginx进程，给出警告并退出
+  warning "端口 $port 被非nginx进程占用，请手动释放端口后重试"
+  error "为了安全起见，脚本将退出"
 }
 
 ##################################
